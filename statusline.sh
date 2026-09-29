@@ -219,7 +219,7 @@ if [ -n "$stdin_five_pct" ]; then
     seven_day_reset_epoch=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 fi
 
-# ── Fallback: API call (cached) ────────────────────────
+# ── Usage API (cached) ─────────────────────────────────
 # Cache por usuário e não-legível por terceiros: a resposta da API de uso é
 # dado de conta, e um caminho fixo em /tmp colide entre usuários da mesma máquina.
 cache_dir="${XDG_RUNTIME_DIR:-/tmp}/claude-$(id -u)"
@@ -230,7 +230,9 @@ mkdir -p "$cache_dir" 2>/dev/null && chmod 700 "$cache_dir" 2>/dev/null
 usage_data=""
 extra_enabled="false"
 
-if ! $has_stdin_rates; then
+# Lê o cache (até 60s) ou busca /api/oauth/usage. Roda mesmo com rate_limits no
+# stdin: os limites por modelo (ex.: Fable) só vêm da API, em .limits[].
+load_usage_data() {
     needs_refresh=true
 
     if [ -f "$cache_file" ]; then
@@ -285,7 +287,11 @@ if ! $has_stdin_rates; then
             usage_data=$(cat "$cache_file" 2>/dev/null)
         fi
     fi
+}
 
+load_usage_data
+
+if ! $has_stdin_rates; then
     if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
         five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
         five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
@@ -296,58 +302,49 @@ if ! $has_stdin_rates; then
 
         extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
     fi
-else
-    if [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
-        if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-            extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-        fi
-    fi
+elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
+    extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
 fi
 
-# ── Rate limit lines ────────────────────────────────────
+# ── Rate limit line (compacta: todos os limites numa linha só) ──
 rate_lines=""
-bar_width=10
+bar_width=5
 
-if [ -n "$five_hour_pct" ]; then
-    five_hour_reset=$(format_epoch_time "$five_hour_reset_epoch" "time")
-    five_hour_bar=$(build_bar "$five_hour_pct" "$bar_width")
-    five_hour_pct_color=$(color_for_pct "$five_hour_pct")
-    five_hour_pct_fmt=$(printf "%3d" "$five_hour_pct")
+# Acrescenta um segmento "rótulo ●●○○○ 42% ⟳reset" à linha de limites
+add_rate_segment() {
+    local label=$1 pct=$2 value=$3 reset_text=$4
+    local segment="${white}${label}${reset} $(build_bar "$pct" "$bar_width") $(color_for_pct "$pct")${value}${reset}"
+    [ -n "$reset_text" ] && segment+=" ${dim}⟳${reset}${white}${reset_text}${reset}"
+    [ -n "$rate_lines" ] && rate_lines+="${sep}"
+    rate_lines+="$segment"
+}
 
-    rate_lines+="${white}current${reset} ${five_hour_bar} ${five_hour_pct_color}${five_hour_pct_fmt}%${reset}"
-    [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${five_hour_reset}${reset}"
-fi
+[ -n "$five_hour_pct" ] && add_rate_segment "5h" "$five_hour_pct" "${five_hour_pct}%" \
+    "$(format_epoch_time "$five_hour_reset_epoch" "time")"
 
-if [ -n "$seven_day_pct" ]; then
-    seven_day_reset=$(format_epoch_time "$seven_day_reset_epoch" "datetime")
-    seven_day_bar=$(build_bar "$seven_day_pct" "$bar_width")
-    seven_day_pct_color=$(color_for_pct "$seven_day_pct")
-    seven_day_pct_fmt=$(printf "%3d" "$seven_day_pct")
+[ -n "$seven_day_pct" ] && add_rate_segment "wk" "$seven_day_pct" "${seven_day_pct}%" \
+    "$(format_epoch_time "$seven_day_reset_epoch" "day")"
 
-    [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}weekly${reset}  ${seven_day_bar} ${seven_day_pct_color}${seven_day_pct_fmt}%${reset}"
-    [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
+# Limites semanais separados por modelo (ex.: Fable), de .limits[] da API
+if [ -n "$usage_data" ]; then
+    while IFS=$'\t' read -r scoped_name scoped_pct scoped_reset_iso; do
+        [ -z "$scoped_name" ] && continue
+        scoped_pct=$(printf "%.0f" "$scoped_pct")
+        add_rate_segment "$(echo "$scoped_name" | tr '[:upper:]' '[:lower:]')" "$scoped_pct" "${scoped_pct}%" \
+            "$(format_epoch_time "$(iso_to_epoch "$scoped_reset_iso")" "day")"
+    done < <(echo "$usage_data" | jq -r '.limits[]? | select(.kind == "weekly_scoped")
+        | [(.scope.model.display_name // .scope.surface.display_name // "scoped"), (.percent // 0), (.resets_at // "")] | @tsv' 2>/dev/null)
 fi
 
 if [ "$extra_enabled" = "true" ] && [ -n "$usage_data" ]; then
     extra_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
     extra_used=$(echo "$usage_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
     extra_limit=$(echo "$usage_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
-    extra_bar=$(build_bar "$extra_pct" "$bar_width")
-    extra_pct_color=$(color_for_pct "$extra_pct")
-
-    extra_reset=$(date -v+1m -v1d +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if [ -z "$extra_reset" ]; then
-        extra_reset=$(date -d "$(date +%Y-%m-01) +1 month" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    fi
-
-    [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}extra${reset}   ${extra_bar} ${extra_pct_color}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset} ${dim}⟳${reset} ${white}${extra_reset}${reset}"
+    add_rate_segment "extra" "$extra_pct" "\$${extra_used}/\$${extra_limit}" ""
 fi
 
 # ── Output ──────────────────────────────────────────────
 printf "%b" "$line1"
-[ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
+[ -n "$rate_lines" ] && printf "\n%b" "$rate_lines"
 
 exit 0
