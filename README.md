@@ -5,7 +5,7 @@ window usage on the first line, plan rate limits on the second.
 
 ```
 Opus 5 (1M context) │ 115k/1M (11%) │ myproject (main*) │ ⏱ 39m │ ◑ default
-5h ●○○○○ 12% ⟳4:33pm │ wk ●●○○○ 34% ⟳aug 27 │ fable ●●●●● 100% ⟳aug 27
+5h ●○○○○ 12% ⟳16:33 │ wk ●●○○○ 34% ⟳aug 27 │ fable ●●●●● 100% ⟳aug 27
 ```
 
 Line 1 — model, context used / window size (percentage), directory with git

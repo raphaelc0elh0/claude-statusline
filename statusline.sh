@@ -50,6 +50,14 @@ build_bar() {
     printf "${bar_color}${filled_str}${dim}${empty_str}${reset}"
 }
 
+# Formata um epoch em "%d" via date; tenta BSD (macOS) e depois GNU
+fmt_epoch() {
+    local epoch=$1 fmt=$2 result
+    result=$(date -j -r "$epoch" +"$fmt" 2>/dev/null)
+    [ -z "$result" ] && result=$(date -d "@$epoch" +"$fmt" 2>/dev/null)
+    printf "%s" "$result"
+}
+
 format_epoch_time() {
     local epoch=$1
     local style=$2
@@ -58,19 +66,18 @@ format_epoch_time() {
     local result=""
     case "$style" in
         time)
-            result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
+            result=$(fmt_epoch "$epoch" "%H:%M")
             ;;
         datetime)
-            result=$(date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
+            result=$(fmt_epoch "$epoch" "%b %-d, %H:%M" | tr '[:upper:]' '[:lower:]')
             ;;
         *)
-            result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d" 2>/dev/null)
-            result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
+            # Se o reset cai hoje, a data nao diz nada: mostra a hora
+            if [ "$(fmt_epoch "$epoch" "%Y-%m-%d")" = "$(date +%Y-%m-%d)" ]; then
+                result=$(fmt_epoch "$epoch" "%H:%M")
+            else
+                result=$(fmt_epoch "$epoch" "%b %-d" | tr '[:upper:]' '[:lower:]')
+            fi
             ;;
     esac
     printf "%s" "$result"
