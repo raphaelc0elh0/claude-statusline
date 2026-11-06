@@ -313,7 +313,9 @@ load_usage_data
 
 if ! $has_stdin_rates; then
     if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // empty | round')
+        # Plano sem limite de 5 h (Ultra) devolve five_hour com resets_at null e
+        # utilization 0: sem janela, sem barra.
+        five_hour_pct=$(echo "$usage_data" | jq -r 'if .five_hour.resets_at then .five_hour.utilization // empty | round else empty end')
         five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
         five_hour_reset_epoch=$(iso_to_epoch "$five_hour_reset_iso")
         seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
