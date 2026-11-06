@@ -79,6 +79,14 @@ Two things worth knowing:
    a per-user directory created with mode `700` — the cached usage data is not
    readable by other users on the machine.
 
+If a call fails (e.g. a 429), the script waits 10 minutes before trying again,
+and once the cached data is 15 minutes old the line says so (`⚠ uso de 2h
+atrás`) instead of showing old numbers as current.
+
+`five_hour` may come back `null`: since 30/10/2026 verified Ultra accounts
+(formerly Max 20x) have no 5-hour limit. That is a valid response — the `5h`
+bar is just left out and the weekly bars keep rendering.
+
 If you would rather not have a status line script touching your credentials at
 all, delete the body of `load_usage_data` (under `# ── Usage API (cached) ──`).
 You lose the per-model bars and extra-usage credits; recent Claude Code versions

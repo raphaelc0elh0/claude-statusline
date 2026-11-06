@@ -232,6 +232,7 @@ fi
 cache_dir="${XDG_RUNTIME_DIR:-/tmp}/claude-$(id -u)"
 cache_file="${cache_dir}/statusline-usage-cache.json"
 cache_max_age=60
+backoff_file="${cache_dir}/statusline-usage-backoff"
 mkdir -p "$cache_dir" 2>/dev/null && chmod 700 "$cache_dir" 2>/dev/null
 
 usage_data=""
@@ -250,6 +251,13 @@ load_usage_data() {
             needs_refresh=false
             usage_data=$(cat "$cache_file" 2>/dev/null)
         fi
+    fi
+
+    # Depois de uma falha (ex.: 429 em 31/10/2026), espera 10 min antes de tentar
+    # de novo: bater a cada 60 s só prolonga o rate limit.
+    if $needs_refresh && [ -f "$backoff_file" ]; then
+        backoff_mtime=$(stat -c %Y "$backoff_file" 2>/dev/null || stat -f %m "$backoff_file" 2>/dev/null)
+        [ $(( $(date +%s) - backoff_mtime )) -lt 600 ] && needs_refresh=false
     fi
 
     if $needs_refresh; then
@@ -285,14 +293,19 @@ load_usage_data() {
                 -H "anthropic-beta: oauth-2025-04-20" \
                 -H "User-Agent: claude-code/2.1.34" \
                 "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-            if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+            # five_hour vem null desde 30/10/2026: o Max 20x virou Ultra e conta verificada do
+            # Ultra não tem limite de 5 h. Resposta válida é a que TEM a chave, mesmo nula.
+            if [ -n "$response" ] && echo "$response" | jq -e 'type == "object" and has("five_hour")' >/dev/null 2>&1; then
                 usage_data="$response"
                 echo "$response" > "$cache_file"
+                rm -f "$backoff_file"
+            else
+                touch "$backoff_file"
             fi
         fi
-        if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-            usage_data=$(cat "$cache_file" 2>/dev/null)
-        fi
+    fi
+    if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
+        usage_data=$(cat "$cache_file" 2>/dev/null)
     fi
 }
 
@@ -300,7 +313,7 @@ load_usage_data
 
 if ! $has_stdin_rates; then
     if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
+        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // empty | round')
         five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
         five_hour_reset_epoch=$(iso_to_epoch "$five_hour_reset_iso")
         seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
@@ -348,6 +361,17 @@ if [ "$extra_enabled" = "true" ] && [ -n "$usage_data" ]; then
     extra_used=$(echo "$usage_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
     extra_limit=$(echo "$usage_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
     add_rate_segment "extra" "$extra_pct" "\$${extra_used}/\$${extra_limit}" ""
+fi
+
+# Cache velho (API falhando) não pode se passar por dado atual
+if [ -f "$cache_file" ]; then
+    cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file") ))
+    if [ "$cache_age" -ge 900 ]; then
+        if [ "$cache_age" -ge 86400 ]; then age_txt="$(( cache_age / 86400 ))d"
+        elif [ "$cache_age" -ge 3600 ]; then age_txt="$(( cache_age / 3600 ))h"
+        else age_txt="$(( cache_age / 60 ))m"; fi
+        rate_lines+="${sep}${yellow}⚠ uso de ${age_txt} atrás${reset}"
+    fi
 fi
 
 # ── Output ──────────────────────────────────────────────
